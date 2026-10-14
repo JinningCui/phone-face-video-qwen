@@ -1,6 +1,8 @@
 import unittest
 import json
 import os
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -50,6 +52,22 @@ class CaptureTests(unittest.TestCase):
         snapshot = reviewer.snapshot(session)
         self.assertEqual(len(snapshot['captures']), 1)
         self.assertTrue(reviewer.image(session, snapshot['captures'][0]['id']).startswith(b'\xff\xd8'))
+
+    def test_confirmed_face_is_exported_to_spool(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+                os.environ, {'PHONE_FACE_EXPORT_DIR': directory}):
+            reviewer = CaptureReviewer()
+            reviewer._classify = lambda person, face, phone: True
+            session = 'a' * 32
+            reviewer.consider(session, self.frame, self.detections, self.people)
+            reviewer.tasks.join()
+            tracks = list(reviewer.sessions[session]['tracks'].values())
+            self.assertEqual(len(tracks), 1)
+            target = Path(directory) / session / tracks[0]['id']
+            manifest = json.loads((target / 'manifest.json').read_text())
+            self.assertEqual(manifest['count'], 1)
+            self.assertEqual(manifest['policy'], 'improving_append_only_v1')
+            self.assertTrue((target / '01.jpg').read_bytes().startswith(b'\xff\xd8'))
 
     def test_phone_is_assigned_only_to_nearest_pose_wrist(self):
         frame = self.frame.copy()

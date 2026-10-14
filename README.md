@@ -1,14 +1,14 @@
 # 手机、人脸与拍摄者视频识别
 
-此仓库包含手机、人脸与人体姿态检测代码，以及两份匹配的 YOLO 权重。在实时网页中，Qwen 进一步核对人物是否正在拍照／录像，并维护每位拍摄者最多 5 张人脸截图。网页支持本机摄像头、RTSP/RTMP 视频源、拖拽上传视频，以及批量生成打框 MP4。仓库不包含 Qwen 权重、Docker 镜像、真实测试视频、FTP 凭据或截图数据。
+此仓库包含手机、人脸与人体姿态检测代码，以及两份匹配的 YOLO 权重。在实时网页中，Qwen 进一步核对人物是否正在拍照／录像，并维护每位拍摄者最多 5 张人脸截图；启用 FTP 时，确认后的截图会逐张自动导出。网页支持本机摄像头、RTSP/RTMP 视频源、拖拽上传视频，以及批量生成打框 MP4。仓库不包含 Qwen 权重、Docker 镜像、真实测试视频、FTP 凭据或截图数据。
 
 ## 版本与目录
 
 - **本仓库的源码**：推理与网页代码位于 `src/phone_face`；网页启动时无需预置 `video_test/test.mp4`。YOLO 权重的 SHA-256 见 [WEIGHTS.md](WEIGHTS.md)。
 - **`phone-face-qwen35:ftp-export-v4`**：独立 Docker 镜像，内置 Qwen3.5-4B、YOLO、网页和 FTP 截图导出功能。该镜像文件**不在本仓库中**，本仓库源码也不是该镜像的逐字节快照。已有此镜像时可按下文运行。
-- **本仓库的 Qwen 配置**：默认模型为 **Qwen3.5-4B**。本仓库源码不含 Docker 版的 FTP 导出功能。
+- **本仓库的 Qwen 配置**：默认模型为 **Qwen3.5-4B**。本仓库包含截图导出与主机端 FTP 上传代码，但不包含现有镜像或真实 FTP 配置。
 
-目录：`src/phone_face/` 为推理和网页代码，`weights/` 为 YOLO 权重，`scripts/` 为命令行脚本和 Docker 版 FTP 上传器。`models/`、`video_test/`、`outputs/` 均不提交真实数据。
+目录：`src/phone_face/` 为推理、截图导出和网页代码，`weights/` 为 YOLO 权重，`scripts/` 为命令行与 FTP 上传脚本。`models/`、`video_test/`、`outputs/` 均不提交真实数据。
 
 ## 方案一：以 Qwen3.5-4B 运行本仓库源码
 
@@ -64,6 +64,22 @@ curl http://127.0.0.1:7860/api/health
 DEVICE=0 ./scripts/run_phone_face_video.sh /path/to/input.mp4 result_name
 ```
 
+## 自动导出拍摄者截图到 FTP
+
+网页的双栏识别流程适用于实时摄像头、RTSP/RTMP 和作为演示流打开的上传视频。Qwen 确认正在拍摄且人脸清晰后，程序立即把第一张截图写入 `outputs/ftp_spool`；同一人后续只有质量分高于上一张才追加，最多 5 张。主机端上传器每秒检查一次，有新图便上传到以会话和人物命名的文件夹。批量打框任务只生成检测结果，不运行拍摄者截图审核或 FTP 导出。
+
+仓库中的 [`ftp.example.py`](ftp.example.py) 把连接信息写成 `xxx`。可复制成仓库根目录的 `ftp.py` 后填写自己的连接信息；`ftp.py` 已被 `.gitignore` 排除。上传器只解析 `HOST`、`REMOTE_DIR` 和 `ftp.login(...)` 的字面值，**不会执行**该文件。也可不用 `ftp.py`，在运行环境设置 `FTP_HOST`、`FTP_USER`、`FTP_PASSWORD`、`FTP_REMOTE_ROOT`。请勿把真实配置提交到 GitHub。
+
+原生部署时，在已启动 Qwen 服务且已进入视觉环境的终端运行以下脚本；它同时启动网页和持续上传器，按 `Ctrl+C` 停止两者：
+
+```bash
+cp ftp.example.py ftp.py
+# 在本机编辑 ftp.py，把 xxx 改成自己的连接信息
+DEVICE=0 ./scripts/run_with_ftp.sh
+```
+
+RTSP 推流时可加 `NETWORK_SOURCE=rtsp://127.0.0.1:8554/live/action6`。无需 `ftp.py` 的环境变量方式也受支持；脚本启动前会验证三个连接变量已一起提供。`outputs/ftp_spool` 与 `outputs/ftp_upload_state` 必须保留以供失败重试、避免重复上传；网络不通时，截图仍留在本地，上传器稍后重试。
+
 ## 实时 RTMP/RTSP 推流
 
 相机或手机推送 RTMP 到 MediaMTX，例如 `rtmp://服务器IP:1935/live/action6`。在同一台服务器读取对应的 RTSP 地址 `rtsp://127.0.0.1:8554/live/action6`。启动识别网页时可预填视频源：
@@ -93,16 +109,16 @@ docker run -d --name phone-face-web --restart unless-stopped \
 
 若从同一 Linux 主机读取 MediaMTX 推流，把上面的 `-p 7860:7860` 换成 `--network host`，并加上 `-e NETWORK_SOURCE=rtsp://127.0.0.1:8554/live/action6`。容器需要能访问主机的 MediaMTX 端口。GPU 号按实际机器修改。`docker logs -f phone-face-web` 查看启动日志；`docker stop phone-face-web` 停止。
 
-Docker 版确认拍摄者后，将 JPEG 截图写入 `outputs/ftp_spool`。**写入目录不等于已上传 FTP**：主机还需运行上传器，并提供可用的 FTP 连接及现有 `ftp.py` 客户端示例文件；凭据只保留在主机，不应提交到 GitHub。
+Docker 版确认拍摄者后，将 JPEG 截图写入 `outputs/ftp_spool`。**写入目录不等于已上传 FTP**：主机还需持续运行上传器，使用私有 `ftp.py` 或上述环境变量配置连接；不要把凭据装入镜像或提交到 GitHub。
 
 ```bash
 python3 scripts/ftp_upload_faces.py \
   --spool "$PWD/outputs/ftp_spool" \
-  --ftp-example /path/to/private/ftp.py \
-  --remote-root /your/remote/root \
-  --state-dir "$PWD/outputs/ftp_upload_state" \
-  --interval 1
+  --ftp-example "$PWD/ftp.py" \
+  --state-dir "$PWD/outputs/ftp_upload_state"
 ```
+
+上传器会优先使用 `FTP_REMOTE_ROOT`，否则使用 `ftp.py` 的 `REMOTE_DIR`；也可以显式传入 `--remote-root /faces`。若需要重启后自动继续上传，请把上述上传命令配置为主机的 systemd 服务。
 
 如果需要**从源码构建新的**一体化镜像，而不是运行已有的 v4 镜像，需要准备 `models/Qwen3.5-4B` 中的模型权重：
 

@@ -11,8 +11,11 @@ import threading
 import time
 import urllib.request
 import uuid
+from pathlib import Path
 
 import cv2
+
+from .export_spool import publish_faces
 
 
 MAX_CAPTURES_PER_TRACK = 5
@@ -80,6 +83,15 @@ def _store_ranked(track, image, score, signature):
                        'signature': signature, 'version': 1})
     images.sort(key=lambda item: item['score'], reverse=True)
     del images[MAX_CAPTURES_PER_TRACK:]
+
+
+def _append_improving_export(track, image, score):
+    """Keep at most five accepted exports, each better than the last."""
+    exported = track.setdefault('export_images', [])
+    if len(exported) >= MAX_CAPTURES_PER_TRACK or (exported and score <= exported[-1]['score']):
+        return False
+    exported.append({'image': image, 'score': score})
+    return True
 
 
 def _face_quality(frame, face):
@@ -196,6 +208,8 @@ class CaptureReviewer:
         self.tasks = queue.Queue(maxsize=16)
         self.url = os.environ.get('QWEN_VL_URL', 'http://127.0.0.1:8001/v1/chat/completions')
         self.model = os.environ.get('QWEN_VL_MODEL', 'Qwen3.5-4B')
+        export_dir = os.environ.get('PHONE_FACE_EXPORT_DIR', '').strip()
+        self.export_root = Path(export_dir) if export_dir else None
         self.interval = max(.7, float(os.environ.get('QWEN_REVIEW_INTERVAL', '1.5')))
         workers = min(3, max(1, int(os.environ.get('QWEN_REVIEW_WORKERS', '2'))))
         for index in range(workers):
@@ -315,6 +329,13 @@ class CaptureReviewer:
                     track['pending'] = False
                     if accepted:
                         _store_ranked(track, face, score, signature)
+                        if self.export_root is not None and _append_improving_export(track, face, score):
+                            try:
+                                publish_faces(self.export_root, session_id,
+                                              track_id, track['export_images'])
+                            except Exception as exc:
+                                track['export_images'].pop()
+                                error = f'正脸导出失败：{str(exc)[:150]}'
                     session['status'] = ('Qwen 服务错误：' + error if error else
                                          '已更新拍摄者 Top-5 截图' if accepted else
                                          '已过滤非拍摄、模糊或遮挡画面')

@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 .env
 .env.*
+/ftp.py
 outputs/
 inputs/
 video_test/*

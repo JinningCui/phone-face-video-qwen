@@ -42,7 +42,36 @@ def credentials_from_example(path: Path) -> tuple[str, str, str]:
     if not all(isinstance(value, str) and value for value in
                (host, username, password)):
         raise ValueError('ftp.py must contain literal HOST and ftp.login credentials')
+    if any(value == 'xxx' for value in (host, username, password)):
+        raise ValueError('Replace the xxx placeholders in the private ftp.py')
     return host, username, password
+
+
+def credentials_from_config(path: Path | None) -> tuple[str, str, str]:
+    """Prefer environment variables; otherwise read a private ftp.py safely."""
+    values = tuple(os.environ.get(name, '') for name in
+                   ('FTP_HOST', 'FTP_USER', 'FTP_PASSWORD'))
+    if any(values):
+        if not all(values) or any(value == 'xxx' for value in values):
+            raise ValueError('Set FTP_HOST, FTP_USER and FTP_PASSWORD together')
+        return values
+    if path is None or not path.is_file():
+        raise ValueError('Set FTP_HOST/FTP_USER/FTP_PASSWORD or provide a private ftp.py')
+    return credentials_from_example(path)
+
+
+def remote_root_from_example(path: Path | None) -> str | None:
+    if path is None or not path.is_file():
+        return None
+    tree = ast.parse(path.read_text(encoding='utf-8'))
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == 'REMOTE_DIR'
+                for target in node.targets)):
+            value = ast.literal_eval(node.value)
+            if isinstance(value, str) and value.startswith('/') and value != '/xxx':
+                return value
+    return None
 
 
 def ensure_dir(ftp: FTP, path: str) -> None:
@@ -138,11 +167,11 @@ def _named_target(state_root: Path, remote_root: str, data: dict,
     return remote_root.rstrip('/') + '/' + session['name'] + '/' + person_name
 
 
-def sync_once(spool: Path, example: Path, remote_root: str,
+def sync_once(spool: Path, example: Path | None, remote_root: str,
               state_root: Path | None = None) -> tuple[int, int]:
     if not remote_root.startswith('/'):
         raise ValueError('FTP root must be an absolute path')
-    host, username, password = credentials_from_example(example)
+    host, username, password = credentials_from_config(example)
     state_root = state_root or spool.parent / 'ftp_upload_state'
     state_root.mkdir(parents=True, exist_ok=True)
     ready = uploaded = 0
@@ -211,17 +240,26 @@ def sync_once(spool: Path, example: Path, remote_root: str,
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument('--spool', type=Path, required=True)
-    parser.add_argument('--ftp-example', type=Path, required=True)
-    parser.add_argument('--remote-root', default='/20261010')
+    parser.add_argument('--spool', type=Path, default=Path('outputs/ftp_spool'))
+    parser.add_argument('--ftp-example', type=Path, default=Path('ftp.py'))
+    parser.add_argument('--remote-root')
     parser.add_argument('--state-dir', type=Path)
     parser.add_argument('--interval', type=float, default=1)
     parser.add_argument('--once', action='store_true')
+    parser.add_argument('--check-config', action='store_true')
     args = parser.parse_args()
+    remote_root = (args.remote_root or os.environ.get('FTP_REMOTE_ROOT') or
+                   remote_root_from_example(args.ftp_example) or '/faces')
+    if args.check_config:
+        credentials_from_config(args.ftp_example)
+        if not remote_root.startswith('/'):
+            raise SystemExit('FTP root must be an absolute path')
+        print('FTP configuration is ready', flush=True)
+        return
     while True:
         try:
             ready, uploaded = sync_once(args.spool, args.ftp_example,
-                                        args.remote_root, args.state_dir)
+                                        remote_root, args.state_dir)
             if args.once:
                 print(f'{ready} ready groups, {uploaded} uploaded', flush=True)
                 return
