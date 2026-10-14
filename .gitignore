@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+.env
+.env.*
+outputs/
+inputs/
+video_test/*
+!video_test/.gitkeep
+models/
+*.tar
+*.tar.gz
+*.log
+ftp_upload_state/
+ftp_spool/

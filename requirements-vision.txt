@@ -1,0 +1,5 @@
+# Install CUDA-enabled torch/torchvision separately, as shown in README.md.
+ultralytics==8.4.129
+opencv-python-headless==4.8.1.78
+numpy>=1.23,<2
+openai>=1,<3

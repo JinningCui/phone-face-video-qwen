@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>拍摄者识别演示 · __VIDEO_TITLE__</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, system-ui, "PingFang SC", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #0a111b; color: #e8f2fa; }
+    .shell { max-width: 1500px; margin: auto; padding: 28px 26px 42px; }
+    header { display: flex; align-items: end; justify-content: space-between; gap: 20px; margin-bottom: 22px; }
+    .eyebrow { color: #81dbcc; letter-spacing: .16em; font-size: 12px; font-weight: 800; }
+    h1 { margin: 8px 0 5px; font-size: clamp(26px, 3vw, 40px); }
+    header p { margin: 0; color: #a8bdd0; }
+    a { color: #96e5d9; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .grid { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(230px, 1fr); gap: 18px; }
+    .panel { min-width: 0; border: 1px solid #2c3d51; background: #111e2c; border-radius: 18px; overflow: hidden; box-shadow: 0 16px 40px #0004; }
+    .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 17px 20px; border-bottom: 1px solid #2c3d51; }
+    h2 { margin: 0; font-size: 19px; }
+    .sub { color: #a5b8c9; font-size: 13px; margin-top: 4px; }
+    .restart { border: 0; border-radius: 9px; padding: 10px 16px; background: #70d4c3; color: #092622; font: inherit; font-weight: 750; white-space: nowrap; }
+    .restart:hover { background: #8de5d7; text-decoration: none; }
+    .screen { min-height: 520px; height: min(76vh, 850px); display: grid; place-items: center; background: #050b12; position: relative; }
+    .screen img { display: block; width: 100%; height: 100%; object-fit: contain; }
+    .foot { padding: 14px 20px; color: #abc3d2; font-size: 14px; display: flex; gap: 10px; align-items: center; }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #73deae; box-shadow: 0 0 12px #73deae; }
+    .gallery { padding: 16px; height: min(76vh, 850px); overflow: hidden; }
+    .note { margin: 0 0 14px; color: #a7bdcb; line-height: 1.6; font-size: 14px; }
+    iframe { display: block; width: 100%; height: calc(100% - 78px); border: 0; background: transparent; }
+    @media (max-width: 620px) { .shell { padding: 18px 12px; } .grid { grid-template-columns: minmax(0, 1fr) minmax(190px, .9fr); gap: 8px; } .panel-head { padding: 12px 8px; } .gallery { padding: 8px; } .screen { min-height: 400px; } h2 { font-size: 15px; } .note { font-size: 12px; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div>
+        <div class="eyebrow">PHONE · FACE · POSE · QWEN</div>
+        <h1>拍摄者识别演示</h1>
+        <p>当前视频：<code>__VIDEO_TITLE__</code> · __VIDEO_DURATION__ · <a href="/demo?video=test">普通测试</a> · <a href="/demo?video=lowlight">低光测试</a>__RESULT_LINK__ · <a href="/dashboard">拖拽上传视频</a></p>
+      </div>
+      <a class="restart" href="/demo?__SOURCE_QUERY__">重新开始</a>
+    </header>
+    <div class="grid">
+      <section class="panel">
+        <div class="panel-head"><div><h2>实时视频</h2><div class="sub">逐帧检测手机、人脸与人体位姿</div></div></div>
+        <div class="screen"><img id="demo-video" src="/api/demo/stream?__SOURCE_QUERY__&amp;session=__SESSION_ID__" alt="__VIDEO_TITLE__ 实时打框画面"></div>
+        <div class="foot"><span class="dot"></span><span id="video-status">正在加载模型和演示视频…</span></div>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><div><h2>拍摄者人脸</h2><div class="sub">自动保留清晰截图</div></div></div>
+        <div class="gallery">
+          <p class="note">手机与手腕的相对位置筛出候选，Qwen 核对拍照／录像动作；只展示清晰、完整的人脸。点击截图可下载。</p>
+          <iframe src="/api/demo/gallery?session=__SESSION_ID__" title="拍摄者人脸截图"></iframe>
+        </div>
+        <div class="foot">视觉推断结果请人工复核</div>
+      </section>
+    </div>
+  </div>
+  <script>
+    const demoImage = document.getElementById('demo-video');
+    const videoStatus = document.getElementById('video-status');
+    const streamUrl = demoImage.getAttribute('src');
+    let retryCount = 0;
+    demoImage.addEventListener('load', () => {
+      retryCount = 0;
+      videoStatus.textContent = '正在循环播放并实时打框';
+    });
+    demoImage.addEventListener('error', () => {
+      videoStatus.textContent = '视频连接中断，正在重新连接…';
+      const delay = Math.min(10000, 2000 * ++retryCount);
+      setTimeout(() => {
+        demoImage.src = streamUrl + '&retry=' + Date.now();
+      }, delay);
+    });
+  </script>
+</body>
+</html>
