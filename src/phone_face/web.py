@@ -223,6 +223,7 @@ class Handler(BaseHTTPRequestHandler):
             camera_source = os.environ.get("CAMERA_SOURCE", "/dev/video0")
             self._json(200, {"ok": True, "default_video": DEFAULT_VIDEO.exists(),
                              "model": MODEL.exists(), "pose_model": POSE_MODEL.exists(),
+                             "face_reid": CAPTURE_REVIEWER.reidentifier is not None,
                              "device": os.environ.get("DEVICE", "cpu"),
                              "camera_source": camera_source,
                              "network_source": os.environ.get("NETWORK_SOURCE", ""),

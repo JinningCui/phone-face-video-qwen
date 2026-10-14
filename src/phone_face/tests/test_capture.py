@@ -2,12 +2,14 @@ import unittest
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 
 from src.phone_face.capture import CaptureReviewer, _candidates, _store_ranked
+from src.phone_face.reid import choose_returning_track
 
 
 class CaptureTests(unittest.TestCase):
@@ -15,7 +17,8 @@ class CaptureTests(unittest.TestCase):
         # Legacy association fixtures use 80px faces; production defaults now
         # require at least 96px and sharper source pixels.
         settings = patch.dict(os.environ, {'CAPTURE_MIN_FACE_SIDE': '64',
-                                          'CAPTURE_MIN_SHARPNESS': '22'})
+                                          'CAPTURE_MIN_SHARPNESS': '22',
+                                          'FACE_REID': '0'})
         settings.start()
         self.addCleanup(settings.stop)
         self.frame = np.full((240, 320, 3), 100, dtype=np.uint8)
@@ -68,6 +71,44 @@ class CaptureTests(unittest.TestCase):
             self.assertEqual(manifest['count'], 1)
             self.assertEqual(manifest['policy'], 'improving_append_only_v1')
             self.assertTrue((target / '01.jpg').read_bytes().startswith(b'\xff\xd8'))
+
+    def test_returning_face_reuses_confirmed_person_and_ftp_folder(self):
+        class StubReidentifier:
+            vector = np.array([1., 0.], dtype=np.float32)
+
+            def extract(self, _crop):
+                return self.vector
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+                os.environ, {'PHONE_FACE_EXPORT_DIR': directory}):
+            reviewer = CaptureReviewer()
+            reviewer.reidentifier = StubReidentifier()
+            reviewer._classify = lambda person, face, phone: True
+            session = 'b' * 32
+            reviewer.consider(session, self.frame, self.detections, self.people)
+            reviewer.tasks.join()
+            first = next(iter(reviewer.sessions[session]['tracks'].values()))
+            first['seen'] = time.monotonic() - 20
+            reviewer.sessions[session]['last_frame'] = 0
+            reviewer.consider(session, self.frame, self.detections, self.people)
+            reviewer.tasks.join()
+            self.assertEqual(len(reviewer.sessions[session]['tracks']), 1)
+            self.assertTrue((Path(directory) / session / first['id'] / 'manifest.json').exists())
+
+    def test_ambiguous_or_different_face_does_not_merge(self):
+        now = time.monotonic()
+        query = np.array([1., 0.], dtype=np.float32)
+        tracks = [
+            {'id': 'a', 'seen': now - 20, 'images': [1],
+             'embeddings': [np.array([1., 0.], dtype=np.float32)]},
+            {'id': 'b', 'seen': now - 20, 'images': [1],
+             'embeddings': [np.array([.99, .14], dtype=np.float32)]},
+        ]
+        self.assertIsNone(choose_returning_track(tracks, query, set(), now))
+        self.assertIsNone(choose_returning_track(tracks[:1], np.array([0., 1.]), set(), now))
+        self.assertIs(choose_returning_track(tracks[:1], query, set(), now), tracks[0])
+        tracks[0]['seen'] = now - 2
+        self.assertIsNone(choose_returning_track(tracks[:1], query, set(), now))
 
     def test_phone_is_assigned_only_to_nearest_pose_wrist(self):
         frame = self.frame.copy()

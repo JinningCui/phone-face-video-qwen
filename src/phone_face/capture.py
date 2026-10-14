@@ -16,6 +16,7 @@ from pathlib import Path
 import cv2
 
 from .export_spool import publish_faces
+from .reid import FaceReidentifier, SFACE, YUNET, choose_returning_track
 
 
 MAX_CAPTURES_PER_TRACK = 5
@@ -117,10 +118,9 @@ def _face_quality(frame, face):
     if sharpness < float(os.environ.get('CAPTURE_MIN_SHARPNESS', '40')):
         return None
     crop = frame[y1-margin:y2+margin, x1-margin:x2+margin]
-    crop = _enhance_face(crop, brightness, sharpness)
     score = (confidence * math.sqrt(min(sharpness, 700)) * side *
              min(brightness / 75, 1) * min(contrast / 35, 1))
-    return score, crop
+    return score, crop, brightness, sharpness
 
 
 def _candidates(frame, detections, people):
@@ -157,24 +157,25 @@ def _candidates(frame, detections, people):
             face_key = tuple(round(v) for v in face['xyxy'])
             if face_key in used_faces or not (px1 <= fx <= px2 and py1 <= fy <= py1 + .63*size):
                 continue
-            quality = _face_quality(frame, face)
-            if quality is None:
-                continue
-            score, face_crop = quality
             head_distance = math.hypot(fx-head[0], fy-head[1]) if head else abs(fx-(px1+px2)/2)
             if head and head_distance > .15*size:
                 continue
+            visible_phones = [phone for phone in matching_phones
+                              if _face_phone_overlap(face['xyxy'], phone['xyxy']) < .02]
+            if not visible_phones:
+                continue
+            quality = _face_quality(frame, face)
+            if quality is None:
+                continue
+            score, face_crop, brightness, sharpness = quality
             priority = (head_distance, -score)
             if best is None or priority < best[0]:
-                best = (priority, score, face, face_crop, face_key)
+                best = (priority, score, face, face_crop, face_key,
+                        brightness, sharpness, visible_phones)
         if best is None:
             continue
-        _, score, face, face_crop, face_key = best
+        _, score, face, face_crop, face_key, brightness, sharpness, visible_phones = best
         used_faces.add(face_key)
-        visible_phones = [phone for phone in matching_phones
-                          if _face_phone_overlap(face['xyxy'], phone['xyxy']) < .02]
-        if not visible_phones:
-            continue
         phone = max(visible_phones, key=lambda d: d.get('confidence', 0))
         margin = .08 * size
         x1 = max(0, int(min(px1, phone['xyxy'][0]) - margin))
@@ -198,7 +199,7 @@ def _candidates(frame, detections, people):
                 phone_crop = cv2.resize(phone_crop,
                                         (round(crop_w*factor), round(crop_h*factor)),
                                         interpolation=cv2.INTER_CUBIC)
-            yield face['xyxy'], context, face_crop, phone_crop, score
+            yield face['xyxy'], context, face_crop, phone_crop, score, brightness, sharpness
 
 
 class CaptureReviewer:
@@ -208,6 +209,8 @@ class CaptureReviewer:
         self.tasks = queue.Queue(maxsize=16)
         self.url = os.environ.get('QWEN_VL_URL', 'http://127.0.0.1:8001/v1/chat/completions')
         self.model = os.environ.get('QWEN_VL_MODEL', 'Qwen3.5-4B')
+        self.reidentifier = (FaceReidentifier() if os.environ.get('FACE_REID', '1') != '0'
+                             and YUNET.is_file() and SFACE.is_file() else None)
         export_dir = os.environ.get('PHONE_FACE_EXPORT_DIR', '').strip()
         self.export_root = Path(export_dir) if export_dir else None
         self.interval = max(.7, float(os.environ.get('QWEN_REVIEW_INTERVAL', '1.5')))
@@ -233,8 +236,10 @@ class CaptureReviewer:
                 if not old['images'] and not old['pending'] and now - old['seen'] > 30:
                     del session['tracks'][old_id]
         assigned = set()
-        for box, person_crop, face_crop, phone_crop, score in _candidates(frame, detections, people):
+        for box, person_crop, face_crop, phone_crop, score, brightness, sharpness in _candidates(
+                frame, detections, people):
             fx, fy = _center(box)
+            embedding = None
             with self.lock:
                 tracks = session['tracks']
                 choices = [t for t in tracks.values() if t['id'] not in assigned and
@@ -243,6 +248,9 @@ class CaptureReviewer:
                            max(90, 1.2 * (box[2]-box[0]))]
                 track = min(choices, key=lambda t: math.hypot(fx-t['center'][0],
                                                               fy-t['center'][1])) if choices else None
+                if track is None and self.reidentifier is not None:
+                    embedding = self.reidentifier.extract(face_crop)
+                    track = choose_returning_track(tracks.values(), embedding, assigned, now)
                 if track is None:
                     track_id = uuid.uuid4().hex[:12]
                     track = {'id': track_id, 'center': (fx, fy), 'seen': now,
@@ -255,6 +263,9 @@ class CaptureReviewer:
                 if (len(track['images']) >= MAX_CAPTURES_PER_TRACK and
                         score <= track['images'][-1]['score']):
                     continue
+                face_crop = _enhance_face(face_crop, brightness, sharpness)
+                if embedding is None and self.reidentifier is not None:
+                    embedding = self.reidentifier.extract(face_crop)
                 ok_person, person_jpeg = cv2.imencode('.jpg', person_crop,
                                                       [cv2.IMWRITE_JPEG_QUALITY, 80])
                 ok_face, face_jpeg = cv2.imencode('.jpg', face_crop,
@@ -266,7 +277,7 @@ class CaptureReviewer:
                 try:
                     self.tasks.put_nowait((session_id, track['id'], person_jpeg.tobytes(),
                                            face_jpeg.tobytes(), phone_jpeg.tobytes(), score,
-                                           _face_signature(face_crop)))
+                                           _face_signature(face_crop), embedding))
                 except queue.Full:
                     session['status'] = 'Qwen 审核排队中'
                     continue
@@ -298,7 +309,8 @@ class CaptureReviewer:
                 image_part(person_jpeg), image_part(face_jpeg), image_part(phone_jpeg),
             ]}],
         }
-        if os.environ.get('QWEN_DISABLE_THINKING') == '1':
+        default_disable_thinking = '1' if 'Qwen3.5' in self.model else '0'
+        if os.environ.get('QWEN_DISABLE_THINKING', default_disable_thinking) == '1':
             payload['chat_template_kwargs'] = {'enable_thinking': False}
         request = urllib.request.Request(self.url, json.dumps(payload).encode(),
                                          {'Content-Type': 'application/json'})
@@ -316,7 +328,7 @@ class CaptureReviewer:
 
     def _worker(self):
         while True:
-            session_id, track_id, person, face, phone, score, signature = self.tasks.get()
+            session_id, track_id, person, face, phone, score, signature, embedding = self.tasks.get()
             error = None
             try:
                 accepted = self._classify(person, face, phone)
@@ -329,6 +341,11 @@ class CaptureReviewer:
                     track['pending'] = False
                     if accepted:
                         _store_ranked(track, face, score, signature)
+                        if embedding is not None:
+                            gallery = track.setdefault('embeddings', [])
+                            if not gallery or max(float(embedding @ item) for item in gallery) < .98:
+                                gallery.append(embedding)
+                                del gallery[:-MAX_CAPTURES_PER_TRACK]
                         if self.export_root is not None and _append_improving_export(track, face, score):
                             try:
                                 publish_faces(self.export_root, session_id,
