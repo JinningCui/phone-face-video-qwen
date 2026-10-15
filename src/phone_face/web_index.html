@@ -37,6 +37,7 @@
     .links a { color: #8ee3d6; text-decoration: none; font-size: 14px; }
     .links a:hover { text-decoration: underline; }
     .live-frame { display: block; width: 100%; max-height: 680px; object-fit: contain; background: #050b13; border-radius: 10px; margin-top: 16px; }
+    .live-frame.portrait, .preview.portrait { height: min(82vh, 960px); max-height: none; object-fit: contain; object-position: center; }
     .realtime-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(230px, 1fr); gap: 20px; align-items: start; }
     .realtime-grid > div { min-width: 0; }
     .capture-panel { position: sticky; top: 18px; }
@@ -45,7 +46,7 @@
     .capture-group h3 { font-size: 15px; margin: 0 0 8px; }
     .capture-group-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     .capture-card { padding: 8px; border: 1px solid #304158; background: #18283a; border-radius: 12px; }
-    .capture-card img { display: block; width: 100%; height: 170px; object-fit: contain; background: #070e16; border-radius: 7px; }
+    .capture-card img { display: block; width: 100%; height: 170px; object-fit: scale-down; background: #070e16; border-radius: 7px; }
     .capture-card small { display: block; margin-top: 7px; color: #bcd3df; }
     @media (max-width: 1100px) { .capture-group-grid { grid-template-columns: 1fr; } }
     @media (max-width: 620px) { .realtime-grid { grid-template-columns: 1fr; } .capture-panel { position: static; } }
@@ -57,7 +58,7 @@
     <div class="eyebrow">Phone · Face · Pose</div>
     <h1>手机与人脸视频识别</h1>
     <p class="lead">拖拽自己的视频并打开双栏识别：左侧直接读取上传的视频逐帧打框，右侧显示经 Qwen 核对的拍摄者人脸。下方也支持图片和视频批量处理。</p>
-    <p><a class="button" href="/demo">打开本地 test.mp4 双栏演示（需自行放入）</a></p>
+    <p><a class="button" href="/demo">打开 test.mp4 双栏演示</a></p>
     <div class="realtime-grid">
     <div>
     <section class="panel" style="margin-bottom:24px">
@@ -90,7 +91,7 @@
     </div>
     <aside class="panel capture-panel">
       <h2>拍摄者人脸截图</h2>
-      <p class="muted">仅在检测到手机靠近手腕、找到完整清晰的人脸，且 Qwen 判断正在拍摄后显示。持续选择更清晰的帧；结果属于视觉推断，请人工复核。</p>
+      <p class="muted">确认拍摄者后持续跟踪，等待清晰正脸并保留每人质量最高的 5 张；结果属于视觉推断，请人工复核。</p>
       <div id="captureStatus" class="muted">启动左侧实时视频后开始分析。</div>
       <div id="captureList" class="capture-list"></div>
     </aside>
@@ -110,7 +111,7 @@
         <h2>待处理文件 <span id="count" class="muted">0 个</span></h2>
         <button id="clear" type="button">清空选择</button>
       </div>
-      <ul id="queue"><li class="item"><span>请选择文件；也可自行放入 video_test/test.mp4</span></li></ul>
+      <ul id="queue"><li class="item"><span>未选择文件，将使用内置 test.mp4</span><small>默认视频</small></li></ul>
       <div class="toolbar">
         <span class="muted">双栏识别请选择一个视频；批量识别结果保存在 outputs/web_jobs。</span>
         <div class="actions" style="margin-top:0">
@@ -129,6 +130,11 @@
     const allowed = new Set(['.jpg','.jpeg','.png','.bmp','.webp','.mp4','.avi','.mov','.mkv','.webm','.m4v','.mpeg','.mpg','.wmv','.ts','.osv']);
     const selected = [];
     const byId = id => document.getElementById(id);
+    for (const id of ['browserFrame', 'liveFrame', 'networkFrame']) {
+      const image = byId(id);
+      image.addEventListener('load', () => image.classList.toggle('portrait',
+        image.naturalHeight > image.naturalWidth));
+    }
     const status = (message, error=false) => { byId('status').textContent = message; byId('status').classList.toggle('error', error); };
     let browserStream = null;
     let browserRunning = false;
@@ -136,6 +142,7 @@
     let browserPreviewUrl = null;
     let activeSession = null;
     let browserSession = null;
+    let captureWatchController = null;
     const createSession = () => Array.from(crypto.getRandomValues(new Uint8Array(16)),
       byte => byte.toString(16).padStart(2, '0')).join('');
     async function refreshCaptures() {
@@ -156,8 +163,8 @@
           person.captures.forEach(capture => {
             const card = document.createElement('div'); card.className = 'capture-card';
             const link = document.createElement('a');
-            link.href = `/api/live/captures/${sessionId}/${capture.id}.jpg?v=${capture.version}`;
-            link.download = `shooter_${capture.id}.jpg`;
+            link.href = `/api/live/captures/${sessionId}/${capture.id}.png?v=${capture.version}`;
+            link.download = `shooter_${capture.id}.png`;
             const image = document.createElement('img'); image.src = link.href; image.alt = `跟踪对象 ${index+1} 的人脸截图`;
             link.append(image);
             const label = document.createElement('small'); label.textContent = `Top ${capture.rank} · 质量分 ${capture.score}`;
@@ -165,9 +172,33 @@
           });
           group.append(heading, grid); list.append(group);
         });
-      } catch (error) { byId('captureStatus').textContent = `截图状态获取失败：${error.message}`; }
+        return data.revision;
+      } catch (error) { byId('captureStatus').textContent = `截图状态获取失败：${error.message}`; return null; }
     }
-    setInterval(refreshCaptures, 2000);
+    async function watchCaptures(sessionId, controller) {
+      let revision = await refreshCaptures() ?? 0;
+      while (sessionId === activeSession && !controller.signal.aborted) {
+        try {
+          const response = await fetch(`/api/demo/changes?session=${sessionId}&after=${revision}`,
+            {cache:'no-store', signal:controller.signal});
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const change = await response.json();
+          if (change.revision > revision) revision = await refreshCaptures() ?? change.revision;
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          byId('captureStatus').textContent = `截图更新连接中断：${error.message}`;
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+    }
+    function activateCaptureSession(sessionId) {
+      captureWatchController?.abort();
+      activeSession = sessionId;
+      byId('captureList').replaceChildren();
+      byId('captureStatus').textContent = '正在分析画面…';
+      captureWatchController = new AbortController();
+      watchCaptures(sessionId, captureWatchController);
+    }
     const browserCanvas = document.createElement('canvas');
     function stopBrowserCamera() {
       browserRunning = false;
@@ -208,8 +239,7 @@
       const raw = byId('browserRaw'); raw.srcObject = browserStream; await raw.play();
       browserRunning = true;
       browserRunId++;
-      browserSession = createSession(); activeSession = browserSession;
-      byId('captureList').replaceChildren();
+      browserSession = createSession(); activateCaptureSession(browserSession);
       byId('browserToggle').textContent = '停止本机摄像头';
       byId('browserFrame').classList.remove('hidden');
       byId('browserStatus').textContent = '摄像头已连接，正在加载模型…';
@@ -252,9 +282,7 @@
     };
     let liveRunning = false;
     let liveSession = null;
-    let defaultVideoAvailable = false;
     fetch('/api/health').then(response => response.json()).then(health => {
-      defaultVideoAvailable = !!health.default_video;
       byId('cameraSource').textContent = `视频源：${health.camera_source} · 推理设备：${health.device}`;
       byId('liveStatus').textContent = health.camera_present ? '点击按钮开始实时识别。' : '容器中未发现摄像头设备，请检查虚拟机 USB 透传及 Docker --device 参数。';
       if (health.network_source) byId('networkSource').value = health.network_source;
@@ -268,8 +296,7 @@
         liveRunning = false;
       } else {
         if (networkRunning) byId('networkToggle').click();
-        liveSession = createSession(); activeSession = liveSession;
-        byId('captureList').replaceChildren();
+        liveSession = createSession(); activateCaptureSession(liveSession);
         frame.classList.remove('hidden');
         frame.src = `/api/live/stream?session=${liveSession}&t=${Date.now()}`;
         byId('liveToggle').textContent = '停止实时识别';
@@ -305,8 +332,7 @@
         return;
       }
       if (liveRunning) byId('liveToggle').click();
-      networkSession = createSession(); activeSession = networkSession;
-      byId('captureList').replaceChildren();
+      networkSession = createSession(); activateCaptureSession(networkSession);
       frame.classList.remove('hidden');
       frame.src = `/api/live/stream?source=${encodeURIComponent(source)}&session=${networkSession}&t=${Date.now()}`;
       byId('networkToggle').textContent = '停止推流识别';
@@ -341,7 +367,7 @@
       byId('count').textContent = `${selected.length} 个`;
       byId('queue').replaceChildren();
       if (!selected.length) {
-        const li = document.createElement('li'); li.className = 'item'; li.textContent = '未选择文件；可上传视频，或自行放入 video_test/test.mp4'; byId('queue').append(li); return;
+        const li = document.createElement('li'); li.className = 'item'; li.textContent = '未选择文件，将使用内置 test.mp4'; byId('queue').append(li); return;
       }
       selected.forEach(item => {
         const li = document.createElement('li'); li.className = 'item';
@@ -370,7 +396,7 @@
     byId('chooseFolder').onclick = () => byId('folder').click();
     byId('files').onchange = event => { addFiles(event.target.files); event.target.value = ''; };
     byId('folder').onchange = event => { addFiles(event.target.files); event.target.value = ''; };
-    byId('clear').onclick = () => { selected.length = 0; renderQueue(); status('已清空，请选择要处理的文件'); };
+    byId('clear').onclick = () => { selected.length = 0; renderQueue(); status('已清空，运行时将使用内置 test.mp4'); };
     for (const event of ['dragenter','dragover']) byId('drop').addEventListener(event, e => { e.preventDefault(); byId('drop').classList.add('drag'); });
     for (const event of ['dragleave','drop']) byId('drop').addEventListener(event, e => { e.preventDefault(); byId('drop').classList.remove('drag'); });
     byId('drop').addEventListener('drop', async e => {
@@ -386,11 +412,7 @@
     }
     byId('runLiveUpload').onclick = async () => {
       const button = byId('runLiveUpload');
-      if (!selected.length) {
-        if (defaultVideoAvailable) location.href = '/demo?video=test';
-        else status('请先上传视频，或放入 video_test/test.mp4', true);
-        return;
-      }
+      if (!selected.length) { location.href = '/demo?video=test'; return; }
       if (selected.length !== 1) { status('双栏识别一次请选择一个视频', true); return; }
       const item = selected[0];
       const ext = item.file.name.slice(item.file.name.lastIndexOf('.')).toLowerCase();
@@ -421,8 +443,16 @@
             const label = document.createElement('p'); label.textContent = preview.name; card.append(label);
           }
           const media = document.createElement(result.kind === 'video' ? 'video' : 'img');
-          media.src = preview.url; media.className = 'preview';
-          if (result.kind === 'video') { media.controls = true; media.preload = 'metadata'; }
+          media.className = 'preview';
+          if (result.kind === 'video') {
+            media.controls = true; media.preload = 'metadata';
+            media.addEventListener('loadedmetadata', () => media.classList.toggle('portrait',
+              media.videoHeight > media.videoWidth));
+          } else {
+            media.addEventListener('load', () => media.classList.toggle('portrait',
+              media.naturalHeight > media.naturalWidth));
+          }
+          media.src = preview.url;
           card.append(media);
         }
         const links = document.createElement('div'); links.className = 'links';
@@ -438,7 +468,6 @@
       }
     }
     byId('run').onclick = async () => {
-      if (!selected.length && !defaultVideoAvailable) { status('请先选择文件，或放入 video_test/test.mp4', true); return; }
       const button = byId('run'); button.disabled = true; byId('resultList').replaceChildren();
       try {
         const ids = [];

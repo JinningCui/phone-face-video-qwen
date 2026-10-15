@@ -22,8 +22,9 @@
     .sub { color: #a5b8c9; font-size: 13px; margin-top: 4px; }
     .restart { border: 0; border-radius: 9px; padding: 10px 16px; background: #70d4c3; color: #092622; font: inherit; font-weight: 750; white-space: nowrap; }
     .restart:hover { background: #8de5d7; text-decoration: none; }
-    .screen { min-height: 520px; height: min(76vh, 850px); display: grid; place-items: center; background: #050b12; position: relative; }
-    .screen img { display: block; width: 100%; height: 100%; object-fit: contain; }
+    .screen { min-height: 520px; height: min(76vh, 850px); background: #050b12; position: relative; overflow: hidden; }
+    .screen.portrait { height: min(88vh, 1000px); }
+    .screen img { display: block; position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; object-position: center; }
     .foot { padding: 14px 20px; color: #abc3d2; font-size: 14px; display: flex; gap: 10px; align-items: center; }
     .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #73deae; box-shadow: 0 0 12px #73deae; }
     .gallery { padding: 16px; height: min(76vh, 850px); overflow: hidden; }
@@ -51,7 +52,7 @@
       <section class="panel">
         <div class="panel-head"><div><h2>拍摄者人脸</h2><div class="sub">自动保留清晰截图</div></div></div>
         <div class="gallery">
-          <p class="note">手机与手腕的相对位置筛出候选，Qwen 核对拍照／录像动作；只展示清晰、完整的人脸。点击截图可下载。</p>
+          <p class="note">手机与手腕的相对位置筛出候选，Qwen 核对拍照／录像动作；先保留可辨认的人脸，持续跟踪并优先保留清晰正脸。点击截图可下载。</p>
           <iframe src="/api/demo/gallery?session=__SESSION_ID__" title="拍摄者人脸截图"></iframe>
         </div>
         <div class="foot">视觉推断结果请人工复核</div>
@@ -65,6 +66,7 @@
     let retryCount = 0;
     demoImage.addEventListener('load', () => {
       retryCount = 0;
+      demoImage.parentElement.classList.toggle('portrait', demoImage.naturalHeight > demoImage.naturalWidth);
       videoStatus.textContent = '正在循环播放并实时打框';
     });
     demoImage.addEventListener('error', () => {

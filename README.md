@@ -1,18 +1,12 @@
-# 手机、人脸与拍摄者视频识别
+# 手机、人脸与拍摄者识别
 
-此仓库包含手机、人脸与人体姿态检测代码、两份匹配的 YOLO 权重，以及用于同一会话内人物重现关联的 OpenCV 人脸模型。在实时网页中，Qwen 进一步核对人物是否正在拍照／录像，并维护每位拍摄者最多 5 张人脸截图；启用 FTP 时，确认后的截图会逐张自动导出。网页支持本机摄像头、RTSP/RTMP 视频源、拖拽上传视频，以及批量生成打框 MP4。仓库不包含 Qwen 权重、Docker 镜像、真实测试视频、FTP 凭据或截图数据。
+本仓库包含 YOLO 手机／人脸检测、人体姿态关联、Qwen3.5-4B 拍摄动作核对、人物重入关联、右侧拍摄者人脸 Top-5 画廊，以及 PNG 截图的 FTP 待传目录与上传器。网页支持视频上传、RTSP/RTMP／摄像头直播和打框视频导出；命令行也能处理视频。公开仓库只包含代码与小模型权重，**不包含 Qwen 权重、真实视频、人脸截图或 FTP 凭据**。
 
-## 版本与目录
+`weights/phone_face/best.pt` 检测 `0=phone` 和 `1=face`；`weights/yolov8n-pose.pt` 用于手机与持有者的姿态关联；`weights/face_reid/` 下的 YuNet/SFace 用于同一网页会话中人物离开后重入的关联。权重校验值见 [WEIGHTS.md](WEIGHTS.md)。所有默认权重路径都相对于仓库根目录。
 
-- **本仓库的源码**：推理与网页代码位于 `src/phone_face`；网页启动时无需预置 `video_test/test.mp4`。YOLO 权重的 SHA-256 见 [WEIGHTS.md](WEIGHTS.md)。
-- **`phone-face-qwen35:ftp-export-v4`**：独立 Docker 镜像，内置 Qwen3.5-4B、YOLO、网页和 FTP 截图导出功能。该镜像文件**不在本仓库中**，本仓库源码也不是该镜像的逐字节快照。已有此镜像时可按下文运行。
-- **本仓库的 Qwen 配置**：默认模型为 **Qwen3.5-4B**。本仓库包含截图导出与主机端 FTP 上传代码，但不包含现有镜像或真实 FTP 配置。
+## 环境与 Qwen 模型
 
-目录：`src/phone_face/` 为推理、截图导出和网页代码，`weights/` 为 YOLO 与人脸关联权重，`scripts/` 为命令行与 FTP 上传脚本。`models/`、`video_test/`、`outputs/` 均不提交真实数据。
-
-## 方案一：以 Qwen3.5-4B 运行本仓库源码
-
-在带 NVIDIA GPU 的 Linux 主机上安装 `ffmpeg`、Miniconda 和可用的 NVIDIA 驱动。以下命令在仓库根目录执行，示例按 Python 3.10 和 CUDA 12.4 的 PyTorch 包编写；CUDA 包版本应与目标机器的驱动能力匹配。
+以下是带 NVIDIA GPU 的 Linux 原生部署方式。先安装 `ffmpeg`、适合显卡驱动的 PyTorch，然后在两个独立 Python 环境中安装视觉依赖和 vLLM。PyTorch/CUDA 包应按目标机器选择；下方 CUDA 12.4 仅为安装示例。
 
 ```bash
 conda create -n phone-face-vision python=3.10 -y
@@ -20,121 +14,57 @@ conda activate phone-face-vision
 python -m pip install torch==2.6.0 torchvision==0.21.0 \
   --index-url https://download.pytorch.org/whl/cu124
 python -m pip install -r requirements-vision.txt
-python -c 'import torch, cv2, ultralytics; print(torch.cuda.is_available(), cv2.__version__, ultralytics.__version__)'
-```
 
-Qwen 使用独立环境和 8001 端口。下载 [官方 Qwen3.5-4B 模型](https://huggingface.co/Qwen/Qwen3.5-4B)；该模型的官方页面提供了 vLLM 启动方式。网络受限时可先在联网机器下载，再完整复制 `models/Qwen3.5-4B/` 到服务器。下列原生配置为部署示例，尚未在新机器上实测；已有 v4 镜像可直接参考方案二。
-
-```bash
 conda create -n phone-face-qwen python=3.10 -y
 conda activate phone-face-qwen
 python -m pip install 'huggingface_hub[cli]' uv
 uv pip install vllm --torch-backend=auto \
   --extra-index-url https://wheels.vllm.ai/nightly
-hf download Qwen/Qwen3.5-4B \
-  --local-dir models/Qwen3.5-4B
-
-# 示例用 GPU 1 加载 Qwen，GPU 0 留给 YOLO；按实际显卡配置调整。
-CUDA_VISIBLE_DEVICES=1 vllm serve "$PWD/models/Qwen3.5-4B" \
-  --served-model-name Qwen3.5-4B \
-  --tensor-parallel-size 1 --max-model-len 32768 \
-  --port 8001 --gpu-memory-utilization 0.80
-```
-
-保持 Qwen 服务运行，在另一终端启动网页。`QWEN_VL_URL` 是 OpenAI 兼容接口地址；`DEVICE=0` 是 YOLO 使用的 GPU。启动成功后访问 `http://服务器IP:7860/dashboard`。右侧截图需要 Qwen 服务可用；Qwen 不可用时左侧 YOLO 打框仍能工作。
-
-```bash
-conda activate phone-face-vision
-DEVICE=0 \
-QWEN_VL_MODEL=Qwen3.5-4B \
-QWEN_VL_URL=http://127.0.0.1:8001/v1/chat/completions \
-python -m src.phone_face.web
-```
-
-检查服务：
-
-```bash
-curl http://127.0.0.1:8001/v1/models
-curl http://127.0.0.1:7860/api/health
-```
-
-`/api/health` 中的 `face_reid: true` 表示已加载 YuNet/SFace。拍摄者离开画面超过 12 秒再进入时，系统会把新的人脸特征与本次网页会话中已由 Qwen 确认的拍摄者比较；只有相似度足够高且候选唯一才复用人物 ID 和 FTP 文件夹。低光、侧脸或遮挡可能无法匹配，此时会保守地建立新人物。网页会话重建或进程重启后不会跨会话匹配。`FACE_REID=0` 可关闭该功能；`FACE_REID_SIMILARITY` 与 `FACE_REID_MARGIN` 可调整默认的 0.75 相似度门槛和 0.12 候选差距。
-
-Qwen 复核保持人物上下文裁剪图的原始分辨率，默认关闭 Qwen3.5 的思考模式；保存的人脸截图仍从原始解码帧裁剪。可用 `QWEN_DISABLE_THINKING=0` 恢复思考模式。单路视频仍按时间顺序检测和跟踪。四卡机器可让 YOLO 与 Qwen 分占显卡，或在多个视频流之间分配显卡。把同一帧的 4B 模型拆到四卡通常不保证更低延迟，帧级并行虽可提高吞吐量，但需要统一跟踪状态并按顺序汇总结果；本仓库当前未实现跨卡帧级并行。
-
-仓库不发布真实人脸演示视频。网页可直接上传自己的视频；如需 `/demo` 默认演示，可自行放入 `video_test/test.mp4`。批量打框也可运行：
-
-```bash
-DEVICE=0 ./scripts/run_phone_face_video.sh /path/to/input.mp4 result_name
-```
-
-## 自动导出拍摄者截图到 FTP
-
-网页的双栏识别流程适用于实时摄像头、RTSP/RTMP 和作为演示流打开的上传视频。Qwen 确认正在拍摄且人脸清晰后，程序立即把第一张截图写入 `outputs/ftp_spool`；同一人后续只有质量分高于上一张才追加，最多 5 张。主机端上传器每秒检查一次，有新图便上传到以会话和人物命名的文件夹。批量打框任务只生成检测结果，不运行拍摄者截图审核或 FTP 导出。
-
-仓库中的 [`ftp.example.py`](ftp.example.py) 把连接信息写成 `xxx`。可复制成仓库根目录的 `ftp.py` 后填写自己的连接信息；`ftp.py` 已被 `.gitignore` 排除。上传器只解析 `HOST`、`REMOTE_DIR` 和 `ftp.login(...)` 的字面值，**不会执行**该文件。也可不用 `ftp.py`，在运行环境设置 `FTP_HOST`、`FTP_USER`、`FTP_PASSWORD`、`FTP_REMOTE_ROOT`。请勿把真实配置提交到 GitHub。
-
-原生部署时，在已启动 Qwen 服务且已进入视觉环境的终端运行以下脚本；它同时启动网页和持续上传器，按 `Ctrl+C` 停止两者：
-
-```bash
-cp ftp.example.py ftp.py
-# 在本机编辑 ftp.py，把 xxx 改成自己的连接信息
-DEVICE=0 ./scripts/run_with_ftp.sh
-```
-
-RTSP 推流时可加 `NETWORK_SOURCE=rtsp://127.0.0.1:8554/live/action6`。无需 `ftp.py` 的环境变量方式也受支持；脚本启动前会验证三个连接变量已一起提供。`outputs/ftp_spool` 与 `outputs/ftp_upload_state` 必须保留以供失败重试、避免重复上传；网络不通时，截图仍留在本地，上传器稍后重试。
-
-## 实时 RTMP/RTSP 推流
-
-相机或手机推送 RTMP 到 MediaMTX，例如 `rtmp://服务器IP:1935/live/action6`。在同一台服务器读取对应的 RTSP 地址 `rtsp://127.0.0.1:8554/live/action6`。启动识别网页时可预填视频源：
-
-```bash
-DEVICE=0 NETWORK_SOURCE=rtsp://127.0.0.1:8554/live/action6 \
-QWEN_VL_MODEL=Qwen3.5-4B \
-python -m src.phone_face.web
-```
-
-网页中的“RTMP / RTSP 网络推流”区域点击启动后才会读取视频源。RTMP 路径由推流端设置，不在识别代码中写死。网页预览可压缩，检测和人脸裁剪使用解码后的原始帧；YOLO 网络内部仍按 `LIVE_IMG_SIZE` 缩放推理输入。浏览器摄像头以无损 PNG 上传画面，服务器返回的带框预览为 JPEG。
-
-## 方案二：运行已有的 `ftp-export-v4` Docker 镜像
-
-此方案要求机器上**已经有** `phone-face-qwen35:ftp-export-v4` 镜像。它内置 Qwen3.5-4B，因此运行镜像时无需另行下载 Qwen。若手头只有镜像归档，先运行 `docker load -i /path/to/image.tar`，再用 `docker image inspect phone-face-qwen35:ftp-export-v4` 确认标签。此镜像是历史版本，不自动包含本仓库较新的画质修改。
-
-上传本地视频、使用容器内网页：
-
-```bash
-mkdir -p outputs
-docker run -d --name phone-face-web --restart unless-stopped \
-  --gpus device=0 --shm-size=8g -p 7860:7860 \
-  -e DEVICE=0 -e PHONE_FACE_EXPORT_DIR=/app/outputs/ftp_spool \
-  -v "$PWD/outputs:/app/outputs" \
-  phone-face-qwen35:ftp-export-v4 web
-```
-
-若从同一 Linux 主机读取 MediaMTX 推流，把上面的 `-p 7860:7860` 换成 `--network host`，并加上 `-e NETWORK_SOURCE=rtsp://127.0.0.1:8554/live/action6`。容器需要能访问主机的 MediaMTX 端口。GPU 号按实际机器修改。`docker logs -f phone-face-web` 查看启动日志；`docker stop phone-face-web` 停止。
-
-Docker 版确认拍摄者后，将 JPEG 截图写入 `outputs/ftp_spool`。**写入目录不等于已上传 FTP**：主机还需持续运行上传器，使用私有 `ftp.py` 或上述环境变量配置连接；不要把凭据装入镜像或提交到 GitHub。
-
-```bash
-python3 scripts/ftp_upload_faces.py \
-  --spool "$PWD/outputs/ftp_spool" \
-  --ftp-example "$PWD/ftp.py" \
-  --state-dir "$PWD/outputs/ftp_upload_state"
-```
-
-上传器会优先使用 `FTP_REMOTE_ROOT`，否则使用 `ftp.py` 的 `REMOTE_DIR`；也可以显式传入 `--remote-root /faces`。若需要重启后自动继续上传，请把上述上传命令配置为主机的 systemd 服务。
-
-如果需要**从源码构建新的**一体化镜像，而不是运行已有的 v4 镜像，需要准备 `models/Qwen3.5-4B` 中的模型权重：
-
-```bash
-python -m pip install 'huggingface_hub[cli]'
 hf download Qwen/Qwen3.5-4B --local-dir models/Qwen3.5-4B
 ```
 
-这条下载命令只准备 Qwen3.5-4B 权重，**不会生成或替换**历史的 `ftp-export-v4` 镜像。Qwen 模型权重不上传到本 GitHub 仓库。
+模型来源：[Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B)。`models/` 已被 `.gitignore` 排除；若已在别处下载，设置 `QWEN_MODEL_DIR` 指向含 `config.json` 的模型目录即可。
 
-## 画质与数据边界
+## 四卡启动
 
-输入视频可能已由相机有损编码。离线视频和网络直播在检测前不会被转成 JPEG；保存的打框 MP4 使用 H.264 有损编码。实时网页的 JPEG 仅用于显示。人脸截图按原始帧裁剪，再以 JPEG 保存；FTP 上传器直接传输截图字节，不二次压缩。截图是否清晰仍受拍摄距离、对焦、运动和光照限制。
+当前在四张 RTX 3090 上验证的分配为：GPU 0、1、2 各运行一个 Qwen3.5-4B 实例，GPU 3 同时运行 YOLO 与姿态估计。三个 Qwen 实例分别监听本机的 8101–8103 端口，网页监听 7860。脚本从仓库根目录定位文件，不写死用户名或机器路径。
 
-公开仓库不包含拍摄对象的视频、人脸截图、FTP 地址／密码或 Qwen 大模型权重。请只处理和发布自己有权使用的影像。
+```bash
+# 终端 1：激活安装了 vLLM 的环境
+conda activate phone-face-qwen
+./scripts/start_four_card_qwen.sh
+
+# 终端 2：激活视觉环境
+conda activate phone-face-vision
+./scripts/start_four_card_web.sh
+```
+
+打开 `http://服务器IP:7860/dashboard` 上传视频或连接摄像头；把自己的 `video_test/test.mp4` 放好后可打开 `/demo?video=test`，低光样本如命名为 `video_test/20261003_C8920.MP4` 可打开 `/demo?video=lowlight`。**启动网页不要求预置测试视频**，缺少测试视频只影响相应的演示页。设置 `NETWORK_SOURCE=rtsp://127.0.0.1:8554/live/action6` 可为网页预填 MediaMTX 流地址，随后在网页点击启动。直播采用“处理最新帧”策略，避免推流帧率高于推理速度时延迟无限累积；极短动作可能因跳帧漏检。文件视频仍逐帧处理。
+
+只有一张 GPU 时，也可自行启动一个 Qwen 服务并设置 `QWEN_VL_URL`，然后用 `DEVICE=0 python -m src.phone_face.web` 启动网页；Qwen 与 YOLO 共卡可能更慢。环境变量 `LIVE_IMG_SIZE` 控制 YOLO 内部推理尺寸，默认 1280；检测接收视频解码后的完整帧。人物上下文和手机图送 Qwen 前不缩小，人脸画廊和 FTP 导出均为原帧裁剪的无损 PNG，网页左侧预览则是 JPEG。
+
+拍摄动作由连续帧的手机与手腕关联触发，再交给 Qwen 核对；拍摄者放下手机后，程序仍会跟踪并选择更清晰的正脸。连续同一人物会复用最近的 SFace 特征，默认每 `FACE_REID_REFRESH_INTERVAL=0.5` 秒刷新，新人物、重入或相邻多人情况立即重算；设为 `0` 可关闭复用。低光人脸的初筛最低亮度为 `CAPTURE_MIN_FACE_BRIGHTNESS=18`，后续仍检查对比度、清晰度、脸尺寸及 Qwen 判定。每人画廊最多保留 5 张图。
+
+四卡实测：1920×1080、50 fps 低光视频前 300 帧，优化前 78.0 秒，当前 43.2 秒；右侧收录 4 名持手机拍摄者、20 张截图。普通 `test.mp4` 724 帧约 40.0 秒，收录 2 人、10 张。该处理速度低于 30 fps 实时流；直播时最新帧策略降低延迟，但不能保证每一输入帧都被检测。测试视频不随仓库发布。
+
+## 命令行与 FTP
+
+命令行生成打框 MP4：
+
+```bash
+DEVICE=3 ./scripts/run_phone_face_video.sh /path/to/input.mp4 result_name
+```
+
+网页将已进入右侧画廊的 Top-5 原图写入 `outputs/ftp_spool`：同一会话、同一人物各有一个目录，文件为 `01.png` 至 `05.png` 及 `manifest.json`。画廊排名改变时对应 PNG 会更新。FTP 上传器默认每秒检查一次，每轮上传一张新增或更新的截图；写入待传目录本身不代表 FTP 已上传。上传器可读环境变量 `FTP_HOST`、`FTP_USER`、`FTP_PASSWORD`、`FTP_REMOTE_ROOT`，或仓库根目录下私有的 `ftp.py`。后者可从 [ftp.example.py](ftp.example.py) 复制并填写，已被 `.gitignore` 排除。
+
+```bash
+conda activate phone-face-vision
+FTP_HOST=ftp.example.com FTP_USER=your_user FTP_PASSWORD=your_password \
+  python scripts/ftp_upload_faces.py --spool outputs/ftp_spool --interval 1
+```
+
+FTP 上传失败时待传 PNG 会留在本地，网络恢复后继续。`outputs/` 不提交。不要把真实 FTP 地址、密码或拍摄对象影像推到公开仓库。
+
+## Docker 历史镜像
+
+`phone-face-qwen35:ftp-export-v4` 是独立的旧镜像，**不会自动包含本仓库现在的低光召回、PNG 画廊与提速修改**。若要运行这版代码，使用上述原生环境，或据此重新构建镜像。仓库没有发布包含 Qwen 权重的一体化 Docker 镜像。

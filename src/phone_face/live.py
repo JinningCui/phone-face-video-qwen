@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -15,6 +17,7 @@ class LiveDetector:
         from ultralytics import YOLO
 
         self.device = device or os.environ.get("DEVICE", "cpu")
+        self.pose_device = os.environ.get("LIVE_POSE_DEVICE", self.device)
         self.imgsz = int(os.environ.get("LIVE_IMG_SIZE", "1280"))
         self.phone_conf = float(os.environ.get("LIVE_PHONE_CONF", os.environ.get("PHONE_CONF", "0.12")))
         self.face_conf = float(os.environ.get("FACE_CONF", "0.35"))
@@ -22,7 +25,7 @@ class LiveDetector:
         self.alpha = float(os.environ.get("SMOOTH_ALPHA", "0.55"))
         self.line_width = max(1, int(os.environ.get("LINE_WIDTH", "1")))
         self.max_width = max(320, int(os.environ.get("LIVE_MAX_WIDTH", "1920")))
-        self.jpeg_quality = min(95, max(40, int(os.environ.get("LIVE_JPEG_QUALITY", "80"))))
+        self.jpeg_quality = min(95, max(40, int(os.environ.get("LIVE_JPEG_QUALITY", "92"))))
         if self.imgsz <= 0 or not all(0 <= x <= 1 for x in
                                       (self.phone_conf, self.face_conf, self.pose_conf)):
             raise ValueError("Invalid live inference settings")
@@ -31,6 +34,8 @@ class LiveDetector:
         if names != {0: "phone", 1: "face"}:
             raise ValueError(f"Expected phone/face classes, got {names}")
         self.pose_model = YOLO(str(pose_path)) if os.environ.get("LIVE_POSE", "1") != "0" else None
+        self.executor = (ThreadPoolExecutor(max_workers=1, thread_name_prefix="pose-inference")
+                         if self.pose_model is not None and self.pose_device != self.device else None)
         self.previous = []
         self.last_frame_at = None
 
@@ -39,6 +44,11 @@ class LiveDetector:
         height, width = frame.shape[:2]
         # Detection and face capture must never consume the reduced JPEG preview.
         # Ultralytics still letterboxes to imgsz internally for model inference.
+        pose_future = None
+        if self.executor is not None:
+            pose_future = self.executor.submit(
+                self.pose_model.predict, source=source_frame, conf=self.pose_conf,
+                imgsz=self.imgsz, device=self.pose_device, verbose=False)
         result = self.model.predict(
             source=source_frame, conf=min(self.phone_conf, self.face_conf),
             imgsz=self.imgsz, device=self.device, verbose=False,
@@ -56,10 +66,11 @@ class LiveDetector:
                                "confidence": float(confidence), "xyxy": list(map(float, xyxy))})
         people = []
         if self.pose_model is not None:
-            pose_result = self.pose_model.predict(
-                source=source_frame, conf=self.pose_conf, imgsz=self.imgsz,
-                device=self.device, verbose=False,
-            )[0]
+            pose_result = (pose_future.result()[0] if pose_future is not None else
+                           self.pose_model.predict(
+                               source=source_frame, conf=self.pose_conf,
+                               imgsz=self.imgsz, device=self.pose_device,
+                               verbose=False)[0])
             people = _pose_people(pose_result, self.pose_conf)
         faces = [d for d in detections if d["class_id"] == 1]
         for phone in (d for d in detections if d["class_id"] == 0):
@@ -87,6 +98,49 @@ class LiveDetector:
         if not ok:
             raise OSError("Could not encode live frame")
         return jpeg.tobytes()
+
+
+class LatestFrameReader:
+    """Keep only the newest decoded live frame while inference is busy."""
+
+    def __init__(self, capture, first_frame):
+        self.capture = capture
+        self.condition = threading.Condition()
+        self.frame = first_frame
+        self.sequence = 0
+        self.stopped = False
+        self.thread = threading.Thread(target=self._read, daemon=True,
+                                       name="live-frame-reader")
+        self.thread.start()
+
+    def _read(self):
+        while True:
+            ok, frame = self.capture.read()
+            with self.condition:
+                if self.stopped or not ok:
+                    self.stopped = True
+                    self.condition.notify_all()
+                    return
+                self.frame = frame
+                self.sequence += 1
+                self.condition.notify_all()
+
+    def next(self, after, timeout=10):
+        deadline = time.monotonic() + timeout
+        with self.condition:
+            while self.sequence <= after and not self.stopped:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False, None, after
+                self.condition.wait(remaining)
+            if self.sequence <= after:
+                return False, None, after
+            return True, self.frame, self.sequence
+
+    def close(self):
+        with self.condition:
+            self.stopped = True
+            self.condition.notify_all()
 
 
 def open_camera(source: str):

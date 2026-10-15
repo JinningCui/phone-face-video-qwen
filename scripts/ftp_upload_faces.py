@@ -20,7 +20,7 @@ from pathlib import Path
 
 ID32 = re.compile(r'[0-9a-f]{32}\Z')
 ID12 = re.compile(r'[0-9a-f]{12}\Z')
-IMAGE_NAME = re.compile(r'0[1-5]\.jpg\Z')
+IMAGE_NAME = re.compile(r'0[1-5]\.(?:jpg|png)\Z')
 SHA256 = re.compile(r'[0-9a-f]{64}\Z')
 SESSION_NAME = re.compile(r'session_\d{8}_\d{6}(?:_\d{2,})?\Z')
 PERSON_NAME = re.compile(r'person_\d{2,}\Z')
@@ -104,17 +104,26 @@ def _manifest(directory: Path) -> dict | None:
     if (not isinstance(entries, list) or not 1 <= len(entries) <= 5 or
             data.get('count') != len(entries)):
         return None
+    policy = data.get('policy')
+    if policy not in ('improving_append_only_v1', 'gallery_top5_png_v1'):
+        return None
+    extension = '.png' if policy == 'gallery_top5_png_v1' else '.jpg'
     for index, entry in enumerate(entries, 1):
         if not isinstance(entry, dict):
             return None
         name, digest = entry.get('name', ''), entry.get('sha256', '')
-        if name != f'{index:02d}.jpg' or not IMAGE_NAME.fullmatch(name) or not SHA256.fullmatch(digest):
+        if name != f'{index:02d}{extension}' or not IMAGE_NAME.fullmatch(name) or not SHA256.fullmatch(digest):
             return None
-    if data.get('policy') == 'improving_append_only_v1':
+    if policy == 'improving_append_only_v1':
         scores = [entry.get('score') for entry in entries]
         if (any(not isinstance(score, (int, float)) or isinstance(score, bool)
                 or not math.isfinite(score) for score in scores) or
-                any(later <= earlier for earlier, later in zip(scores, scores[1:]))):
+            any(later <= earlier for earlier, later in zip(scores, scores[1:]))):
+            return None
+    else:
+        if any(not isinstance(entry.get('frontal'), bool) or
+               not isinstance(entry.get('score'), (int, float)) or
+               not math.isfinite(entry['score']) for entry in entries):
             return None
     return data
 
@@ -196,8 +205,7 @@ def sync_once(spool: Path, example: Path | None, remote_root: str,
             state_root, remote_root, data, manifest_path)
         if state.get('remote_dir') == target_dir and state.get('images') == digests:
             continue
-        # Manifest publication is atomic. Verify and transfer only new ranks;
-        # older ranks remain unchanged in the append-only export policy.
+        # Manifest publication is atomic. Transfer one changed gallery rank per poll.
         pending = []
         for entry in data['images']:
             name, digest = entry['name'], entry['sha256']
@@ -212,8 +220,7 @@ def sync_once(spool: Path, example: Path | None, remote_root: str,
                 pending = []
                 break
             pending.append((name, content))
-            if data.get('policy') == 'improving_append_only_v1':
-                break
+            break
         if not pending:
             continue
         with FTP() as ftp:
@@ -229,8 +236,7 @@ def sync_once(spool: Path, example: Path | None, remote_root: str,
                 except error_perm:
                     ftp.delete(name)
                     ftp.rename(temporary, name)
-        uploaded_images = (previous_images | {name: digests[name] for name, _ in pending}
-                           if data.get('policy') == 'improving_append_only_v1' else digests)
+        uploaded_images = previous_images | {name: digests[name] for name, _ in pending}
         state = {'remote_dir': target_dir, 'images': uploaded_images}
         _save_json(state_path, state)
         uploaded += 1

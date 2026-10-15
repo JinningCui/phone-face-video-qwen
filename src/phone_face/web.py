@@ -161,11 +161,11 @@ class Handler(BaseHTTPRequestHandler):
                 if video_key not in DEMO_VIDEOS:
                     self._error(400, "未知演示视频")
                     return
-                if not DEMO_VIDEOS[video_key][0].is_file():
-                    self._error(404, "演示视频未安装，请在首页上传自己的视频")
+                video_path, title, seconds = DEMO_VIDEOS[video_key]
+                if not video_path.is_file():
+                    self._error(404, "演示视频不存在，请先上传视频")
                     return
-                _, title, seconds = DEMO_VIDEOS[video_key]
-                duration, source_query = f"{seconds} 秒循环", f"video={video_key}"
+                duration, source_query = f"{seconds} 秒视频 · 逐帧处理", f"video={video_key}"
             session_id = uuid.uuid4().hex
             body = Path(__file__).with_name("demo.html").read_text(encoding="utf-8")
             body = (body.replace("__SESSION_ID__", session_id)
@@ -194,36 +194,61 @@ class Handler(BaseHTTPRequestHandler):
             for person_index, person in enumerate(state['people'], 1):
                 cards = []
                 for capture in person['captures']:
-                    image_url = (f"/api/live/captures/{session_id}/{capture['id']}.jpg"
+                    image_url = (f"/api/live/captures/{session_id}/{capture['id']}.png"
                                  f"?v={capture['version']}")
-                    cards.append(f'<a class="card" href="{image_url}" download="shooter_{capture["id"]}.jpg">'
+                    cards.append(f'<a class="card" href="{image_url}" download="shooter_{capture["id"]}.png">'
                                  f'<img src="{image_url}" alt="对象 {person_index} 的人脸截图">'
-                                 f'<small>Top {capture["rank"]} · 质量分 {capture["score"]}</small></a>')
+                                 f'<small>Top {capture["rank"]} · '
+                                 f'{"正脸" if capture["frontal"] else "侧脸／待正脸"} · '
+                                 f'质量分 {capture["score"]}</small></a>')
                 groups.append(f'<section class="person"><h3>跟踪对象 {person_index} · {len(cards)}/{MAX_CAPTURES_PER_TRACK} 张</h3>'
                               '<div class="cards">' + ''.join(cards) + '</div></section>')
             body = ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
-                    '<meta http-equiv="refresh" content="2">'
                     '<style>*{box-sizing:border-box}body{margin:0;background:#111e2c;color:#dcecf4;'
                     'font:14px system-ui,sans-serif}.status{color:#a9c2d0;margin:0 0 14px}'
                     '.person{margin-bottom:22px}.person h3{font-size:15px;margin:0 0 10px}'
                     '.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}'
                     '.card{display:block;padding:8px;border:1px solid #344d60;background:#182b3a;'
                     'border-radius:12px;color:inherit;text-decoration:none}.card img{display:block;'
-                    'width:100%;height:200px;object-fit:contain;background:#071018;border-radius:7px}'
+                    'width:100%;height:200px;object-fit:scale-down;background:#071018;border-radius:7px}'
                     '.card small{display:block;margin-top:8px}.empty{border:1px dashed #40586c;'
                     'padding:28px 12px;border-radius:12px;text-align:center;color:#a7bdcb}'
                     '</style></head><body><p class="status">' + html.escape(state['status']) +
                     f' · 跟踪对象 {len(groups)} 位 · 截图 {len(state["captures"])} 张</p>' +
                     (''.join(groups) if groups else
-                     '<div class="empty">等待符合条件的画面；若无人正在拍摄，右侧保持空白。</div>') +
-                    '</body></html>')
+                     '<div class="empty">等待识别到拍摄者的人脸；后续会继续寻找更清晰的正脸。</div>') +
+                    '<script>'
+                    f'let revision={state["revision"]};'
+                    f'const changes="/api/demo/changes?session={session_id}&after=";'
+                    'async function watch(){for(;;){try{'
+                    'const response=await fetch(changes+revision,{cache:"no-store"});'
+                    'if(!response.ok)throw Error("changes unavailable");'
+                    'const data=await response.json();'
+                    'if(data.revision>revision){location.reload();return;}'
+                    'revision=data.revision;'
+                    '}catch(error){await new Promise(resolve=>setTimeout(resolve,1000));}'
+                    '}}watch();'
+                    '</script></body></html>')
             self._send(200, body.encode(), "text/html; charset=utf-8")
+            return
+        if path == "/api/demo/changes":
+            params = parse_qs(request_url.query)
+            session_id = params.get("session", [""])[0]
+            if not LIVE_SESSION.fullmatch(session_id):
+                self._error(400, "无效演示会话")
+                return
+            try:
+                after = max(0, int(params.get("after", ["0"])[0]))
+            except ValueError:
+                self._error(400, "无效截图版本")
+                return
+            revision = CAPTURE_REVIEWER.wait_for_revision(session_id, after)
+            self._json(200, {"revision": revision})
             return
         if path == "/api/health":
             camera_source = os.environ.get("CAMERA_SOURCE", "/dev/video0")
             self._json(200, {"ok": True, "default_video": DEFAULT_VIDEO.exists(),
                              "model": MODEL.exists(), "pose_model": POSE_MODEL.exists(),
-                             "face_reid": CAPTURE_REVIEWER.reidentifier is not None,
                              "device": os.environ.get("DEVICE", "cpu"),
                              "camera_source": camera_source,
                              "network_source": os.environ.get("NETWORK_SOURCE", ""),
@@ -268,9 +293,10 @@ class Handler(BaseHTTPRequestHandler):
         parts = path.strip("/").split("/")
         if (len(parts) == 5 and parts[:3] == ["api", "live", "captures"]
                 and LIVE_SESSION.fullmatch(parts[3]) and
-                TRACK_ID.fullmatch(parts[4].removesuffix('.jpg'))):
-            image = CAPTURE_REVIEWER.image(parts[3], parts[4].removesuffix('.jpg'))
-            self._send(200, image, "image/jpeg") if image else self._error(404, "截图不存在")
+                parts[4].endswith('.png') and
+                TRACK_ID.fullmatch(parts[4].removesuffix('.png'))):
+            image = CAPTURE_REVIEWER.image(parts[3], parts[4].removesuffix('.png'))
+            self._send(200, image, "image/png") if image else self._error(404, "截图不存在")
             return
         if len(parts) == 3 and parts[:2] == ["api", "jobs"] and IDENTIFIER.fullmatch(parts[2]):
             with LOCK:
@@ -302,7 +328,7 @@ class Handler(BaseHTTPRequestHandler):
         cap = None
         headers_started = False
         try:
-            from .live import LiveDetector, open_camera
+            from .live import LatestFrameReader, LiveDetector, open_camera
 
             source = source_override or os.environ.get("CAMERA_SOURCE", "/dev/video0")
             detector = LiveDetector(MODEL, POSE_MODEL)
@@ -311,6 +337,12 @@ class Handler(BaseHTTPRequestHandler):
             if not ok:
                 self._error(503, f"无法从摄像头读取画面：{source}")
                 return
+            latest = None
+            sequence = 0
+            live_source = (source.isdigit() or source.startswith(
+                ("/dev/video", "rtsp://", "rtsps://", "rtmp://", "rtmps://")))
+            if not demo and live_source and os.environ.get("LIVE_DROP_STALE_FRAMES", "1") != "0":
+                latest = LatestFrameReader(cap, frame)
             self.send_response(200)
             self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
             self.send_header("Cache-Control", "no-store")
@@ -323,25 +355,35 @@ class Handler(BaseHTTPRequestHandler):
                 fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
                 duration = max(1.0, cap.get(cv2.CAP_PROP_FRAME_COUNT) / fps)
                 started = time.monotonic()
+                next_frame_at = started
+                demo_frame_index = 0
             while ok:
                 if demo and time.monotonic() - started >= max(90.0, duration * 2):
                     break
                 jpeg = detector.render(frame)
                 if session_id:
-                    CAPTURE_REVIEWER.consider(session_id, *detector.last_observation)
+                    CAPTURE_REVIEWER.consider(
+                        session_id, *detector.last_observation,
+                        frame_time=demo_frame_index / fps if demo else None)
                 self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " +
                                  str(len(jpeg)).encode() + b"\r\n\r\n" + jpeg + b"\r\n")
                 self.wfile.flush()
                 if demo:
-                    time.sleep(.03)
-                    position_ms = ((time.monotonic() - started) % duration) * 1000
-                    cap.set(cv2.CAP_PROP_POS_MSEC, position_ms)
+                    demo_frame_index += 1
+                    next_frame_at += 1 / fps
+                    delay = next_frame_at - time.monotonic()
+                    if delay > 0:
+                        time.sleep(delay)
                     ok, frame = cap.read()
                     if not ok:
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                         ok, frame = cap.read()
+                        next_frame_at = time.monotonic()
                 else:
-                    ok, frame = cap.read()
+                    if latest is None:
+                        ok, frame = cap.read()
+                    else:
+                        ok, frame, sequence = latest.next(sequence)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as exc:
@@ -349,6 +391,8 @@ class Handler(BaseHTTPRequestHandler):
             if not headers_started:
                 self._error(503, str(exc))
         finally:
+            if 'latest' in locals() and latest is not None:
+                latest.close()
             if cap is not None:
                 cap.release()
             stream_slot.release()
@@ -484,6 +528,9 @@ class Handler(BaseHTTPRequestHandler):
             if ids and any(item not in UPLOADS for item in ids):
                 self._error(404, "上传文件不存在，请重新选择")
                 return
+            if not ids and not DEFAULT_VIDEO.is_file():
+                self._error(404, "默认测试视频不存在，请先上传文件")
+                return
             items = ([UPLOADS[item] for item in ids] if ids else
                      [{"path": str(DEFAULT_VIDEO), "name": "test.mp4"}])
             job_id = uuid.uuid4().hex
@@ -495,7 +542,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     if not MODEL.is_file() or not POSE_MODEL.is_file():
-        raise SystemExit("缺少 YOLO 模型，请检查 weights/phone_face/best.pt 与 weights/yolov8n-pose.pt")
+        raise SystemExit("缺少 YOLO 或姿态模型，请检查 weights 目录")
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     host = os.environ.get("WEB_HOST", "0.0.0.0")
     port = int(os.environ.get("WEB_PORT", "7860"))
