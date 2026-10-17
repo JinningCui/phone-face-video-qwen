@@ -59,8 +59,8 @@ class ParallelTests(unittest.TestCase):
             reviewer = capture.CaptureReviewer()
             reviewer.frame_interval = 0
             reviewer.interval = 0
-            reviewer.follow_review_interval = 0
             reviewer._classify = lambda *_: (time.sleep(.05) or True)
+            reviewer._classify_face = lambda *_: {'face': True, 'frontal': True}
             reviewer.identity.feature = lambda *_: None
             samples = iter(range(9))
             def observations(*_):

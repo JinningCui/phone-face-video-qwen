@@ -106,7 +106,7 @@ def _face_quality(frame, face):
     height, width = frame.shape[:2]
     x1, y1, x2, y2 = [int(round(v)) for v in box]
     side = min(x2 - x1, y2 - y1)
-    if side < int(os.environ.get('CAPTURE_MIN_FACE_SIDE', '96')) or not .65 <= (x2 - x1) / max(1, y2 - y1) <= 1.5:
+    if side < int(os.environ.get('CAPTURE_MIN_FACE_SIDE', '24')) or not .65 <= (x2 - x1) / max(1, y2 - y1) <= 1.5:
         return None
     margin = max(5, int(side * .12))
     if x1 < margin or y1 < margin or x2 > width - margin or y2 > height - margin:
@@ -250,9 +250,6 @@ class CaptureReviewer:
             'QWEN_FRAME_INTERVAL', '0')))
         self.action_window = max(.1, float(os.environ.get('CAPTURE_ACTION_WINDOW', '.8')))
         self.face_window = max(.1, float(os.environ.get('CAPTURE_FACE_WINDOW', '1.5')))
-        self.frontal_follow = max(1., float(os.environ.get('CAPTURE_FRONTAL_FOLLOW', '15')))
-        self.follow_review_interval = max(self.interval, float(os.environ.get(
-            'CAPTURE_FOLLOW_REVIEW_INTERVAL', '.75')))
         self.action_frames = max(2, int(os.environ.get('CAPTURE_ACTION_FRAMES', '2')))
         workers = (len(self.urls) if self.parallel else
                    min(3, max(1, int(os.environ.get('QWEN_REVIEW_WORKERS', '2')))))
@@ -416,12 +413,11 @@ class CaptureReviewer:
                 track['center'], track['seen'] = center, now
                 if need_feature:
                     track['last_feature_at'] = now
-                if track['confirmed_until'] >= event_at:
-                    track['confirmed_until'] = event_at + self.frontal_follow
                 _remember_identity(track, feature, score)
                 if feature is not None:
                     for other in list(tracks.values()):
-                        if other is track or other['id'] in assigned:
+                        if (other is track or other['id'] in assigned or
+                                other['id'] not in tracks):
                             continue
                         similarity = _track_similarity(track, other)
                         recent_fragment = (not other.get('identity_samples') and
@@ -458,7 +454,7 @@ class CaptureReviewer:
                     if len(track['action_hits']) >= self.action_frames:
                         track['action_until'] = event_at + self.face_window
                         if track['confirmed_until'] >= event_at:
-                            track['confirmed_until'] = event_at + self.frontal_follow
+                            track['confirmed_until'] = track['action_until']
                         track['action_at'] = event_at
                         track['action_context'] = observation['context']
                         track['action_phone'] = observation['phone_crop']
@@ -467,14 +463,10 @@ class CaptureReviewer:
                     continue
                 if track['action_context'] is None:
                     continue
-                review_interval = (self.follow_review_interval
-                                   if track['confirmed_until'] >= event_at and track['images']
-                                   else self.interval)
                 if ((not self.parallel and track['pending']) or
-                        (now - track['last_review'] < review_interval and
+                        (now - track['last_review'] < self.interval and
                          not (track['confirmed_until'] >= event_at and
-                              not any(item.get('frontal', False)
-                                      for item in track['images'])))):
+                              not track['images']))):
                     continue
                 eligible = [sample for sample in track['face_samples']
                             if not any((sample['signature'] ^ done['signature']).bit_count() <= 5
@@ -526,7 +518,7 @@ class CaptureReviewer:
                     track['submitted_faces'].append({'signature': signature, 'score': score})
                     track['submitted_faces'] = track['submitted_faces'][-30:]
                     session['status'] = ('Qwen 正在核对人脸质量' if followup_only else
-                                         'Qwen 正在核对拍摄动作和正脸质量')
+                                         'Qwen 正在核对拍摄动作和人脸质量')
             # Backpressure rather than silently discarding a selected frame.
             # This must be outside self.lock so workers can finish while the queue is full.
             self.tasks.put(task)
@@ -672,7 +664,7 @@ class CaptureReviewer:
                             if ready_verdict['shooting']:
                                 track['confirmed_until'] = max(
                                     track.get('confirmed_until', -1),
-                                    ready_at + self.frontal_follow)
+                                    ready_at + self.face_window)
                                 if not was_confirmed:
                                     session['revision'] = session.get('revision', 0) + 1
                                     self.changed.notify_all()
@@ -696,10 +688,9 @@ class CaptureReviewer:
                                         except Exception as exc:
                                             ready_error = f'FTP 待上传目录写入失败：{str(exc)[:120]}'
                             session['status'] = ('Qwen 服务错误：' + ready_error if ready_error else
-                                                 '已更新拍摄者正脸 Top-5 截图' if ready_accepted and ready_verdict['frontal'] else
-                                                 '已截取拍摄者人脸，继续等待正脸' if ready_accepted else
-                                                 '已锁定拍摄者，持续等待清晰正脸' if ready_verdict['shooting']
-                                                 or was_confirmed else
+                                                 '已更新拍摄者人脸 Top-5 截图' if ready_accepted else
+                                                 '已确认拍摄动作，等待短时窗口内的清晰人脸'
+                                                 if ready_verdict['shooting'] or was_confirmed else
                                                  '已过滤非拍摄或无效画面')
             self.tasks.task_done()
 

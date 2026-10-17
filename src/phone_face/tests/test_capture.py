@@ -62,6 +62,17 @@ class CaptureTests(unittest.TestCase):
         with patch.dict(os.environ, {'CAPTURE_MIN_FACE_BRIGHTNESS': '24'}):
             self.assertIsNone(_face_quality(frame, face))
 
+    def test_24_pixel_face_threshold(self):
+        frame = np.full((100, 100, 3), 100, dtype=np.uint8)
+        y, x = np.indices((24, 24))
+        frame[30:54, 30:54] = (((x + y) % 2) * 120 + 40)[:, :, None]
+        with patch.dict(os.environ, {'CAPTURE_MIN_FACE_SIDE': '24',
+                                     'CAPTURE_MIN_SHARPNESS': '1'}):
+            self.assertIsNotNone(_face_quality(
+                frame, {'xyxy': [30, 30, 54, 54], 'confidence': .9}))
+            self.assertIsNone(_face_quality(
+                frame, {'xyxy': [30, 30, 53, 53], 'confidence': .9}))
+
     def test_qwen_confirmation_publishes_face_image(self):
         reviewer = CaptureReviewer()
         reviewer.frame_interval = 0
@@ -230,7 +241,7 @@ class CaptureTests(unittest.TestCase):
         reviewer.tasks.join()
         self.assertEqual(len(reviewer.snapshot('video-time')['captures']), 1)
 
-    def test_confirmed_shooter_is_followed_until_frontal_face(self):
+    def test_confirmed_shooter_keeps_profile_without_long_follow(self):
         reviewer = CaptureReviewer()
         reviewer.frame_interval = reviewer.interval = 0
         reviewer.identity.feature = lambda *_: None
@@ -262,20 +273,20 @@ class CaptureTests(unittest.TestCase):
             provisional = reviewer.snapshot('follow')['captures']
             self.assertEqual(len(provisional), 1)
             self.assertFalse(provisional[0]['frontal'])
-            self.assertIn('继续等待正脸', reviewer.snapshot('follow')['status'])
+            self.assertIn('已更新拍摄者人脸', reviewer.snapshot('follow')['status'])
             reviewer.consider('follow', self.frame, self.detections, self.people,
                               frame_time=14.9)
             reviewer.consider('follow', self.frame, self.detections, self.people,
                               frame_time=29.8)
         reviewer.tasks.join()
         self.assertEqual(len(calls), 1)
-        self.assertEqual(len(followup_faces), 1)
+        self.assertEqual(len(followup_faces), 0)
         result = reviewer.snapshot('follow')
-        self.assertEqual(len(result['captures']), 2)
-        self.assertTrue(result['captures'][0]['frontal'])
+        self.assertEqual(len(result['captures']), 1)
+        self.assertFalse(result['captures'][0]['frontal'])
         saved = reviewer.image('follow', result['captures'][0]['id'])
         decoded = cv2.imdecode(np.frombuffer(saved, np.uint8), cv2.IMREAD_COLOR)
-        self.assertTrue(np.array_equal(decoded, frontal))
+        self.assertTrue(np.array_equal(decoded, profile))
 
     def test_same_face_reentry_keeps_person_and_different_face_stays_separate(self):
         reviewer = CaptureReviewer()
